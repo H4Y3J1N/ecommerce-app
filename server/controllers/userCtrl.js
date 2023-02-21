@@ -6,7 +6,7 @@
 
 const User = require('../models/user');
 const expressAsyncHandler = require("express-async-handler");
-const generateToken = require("../config/generateAuthToken");
+const generateToken = require("../config/generateToken");
 const validateMongodbId = require("../config/validateMongodbID");
 const sgMail = require("@sendgrid/mail");
 sgMail.setApiKey(process.env.SEND_GRID_API_KEY);
@@ -20,7 +20,7 @@ exports.createUser = expressAsyncHandler(async (req,res) => {
     if (userExits) throw new Error("User already exists");
     try{
         const user = await User.create({
-            name: req?.body?.firstName,
+            name: req?.body?.name,
             email : req?.body?.email,
             password : req?.body?.password
         });
@@ -38,13 +38,14 @@ exports.loginUser = expressAsyncHandler(async(req, res) => {
     //check if user exists
     const userFound = await User.findOne({email});
     //check if password is match
-    if (userFound){
+    if (userFound && (await userFound.isPasswordMatched(password))) {
         res.json({
             _id : userFound?._id,
             name: userFound?.name,
             email : userFound?.email,
-            token : generateToken(userFound?.id)
-        })
+            token : generateToken(userFound?.id),
+            role : userFound?.role
+        });
     } else {
         res.status(401);
         throw new Error ("invalid login credentials");
@@ -68,7 +69,20 @@ exports.deleteUser = expressAsyncHandler(async (req, res) => {
 
 
 //------------------------------
-// user profile view
+//fetchUsers
+exports.fetchUsers = expressAsyncHandler(async (req, res) => {
+  console.log(req.headers);
+  try {
+    const users = await User.find({});
+    res.json(users);
+  } catch (error) {
+    res.json(error);
+  }
+});
+
+
+//------------------------------
+// user profile view  // 중급코드의 current user와  비슷한 역할 
 exports.userProfile = expressAsyncHandler(async (req, res) => {
   const { id } = req.params;
   validateMongodbId(id);
@@ -123,20 +137,64 @@ exports.updateUserPassword = expressAsyncHandler(async (req, res) => {
 
 
 //------------------------------
-// Account Verification - Send email
+// Generate email Verification - Send email
 exports.generateVerificationToken = expressAsyncHandler(async (req, res) => {
-    try {
-      //build your message
-      const msg = {
-        to: "wikidipy@naver.com",
-        from: "wikidipy@gmail.com",
-        subject: "My first Node js email sending",
-        text: "Hey check me out for this email",
-      };
-      await sgMail.send(msg);
-      res.json("Email sent");
-    } catch (error) {
-      res.json(error);
-    }
-  });
+  const loginUserId = req.user.id;
+  const user = await User.findById(loginUserId);
+  try {
+    //Generate token
+    const verificationToken = await user.createAccountVerificationToken();
+    //save the user
+    await user.save();
+    console.log(verificationToken);
+    //build your message
+
+    const resetURL = `If you were requested to verify your account, verify now within 10 minutes, otherwise ignore this message <a href="http://localhost:3000/verify-account/${verificationToken}">Click to verify your account</a>`;
+    const msg = {
+      to: "wikidipy@naver.com",
+      from: "wikidipy@gmail.com",
+      subject: "My first Node js email sending",
+      html: resetURL,
+    };
+    await sgMail.send(msg);
+    res.json(resetURL);
+  } catch (error) {
+    res.json(error);
+  }
+});
   
+
+
+//------------------------------
+//Account verification
+exports.accountVerification = expressAsyncHandler(async (req, res) => {
+  const { token } = req.body;
+  const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+
+  //find this user by token
+
+  const userFound = await User.findOne({
+    accountVerificationToken: hashedToken,
+    accountVerificationTokenExpires: { $gt: new Date() },
+  });
+  if (!userFound) throw new Error("Token expired, try again later");
+  //update the proport to true
+  userFound.isAccountVerified = true;
+  userFound.accountVerificationToken = undefined;
+  userFound.accountVerificationTokenExpires = undefined;
+  await userFound.save();
+  res.json(userFound);
+});
+
+
+
+
+
+//------------------------------
+// current user  - 중급코드에서는 이걸 frontend에서 현재유저를 바로 찾기위해 사용
+exports.currentUser = async(req,res) => {
+  User.findOne({ email: req.user.email}).exec((err, user) => {
+    if (err) throw new Error(err);
+    res.json(user);
+  });
+};
